@@ -1,0 +1,9 @@
+[[service]]
+route_prefix = "api"
+command = "cargo"
+args = ["run"]
+port = 9001
+startup_timeout_ms = 15000
+idle_timeout_secs = 120
+health_path = "/health"
+working_directory = "../../hello_backend"
