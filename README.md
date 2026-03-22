@@ -2,6 +2,7 @@
 
 **The self-hosted activator gateway that makes local services feel serverless.**
 
+
 `simpless` gives you one clean ingress point for side projects, home-lab APIs, and internal tools. It keeps backend services private on loopback, starts them only when traffic arrives, and shuts them back down when they go idle.
 
 The result is simple: less always-on clutter, less exposed surface area, and a setup that feels far more polished than a pile of manually managed ports.
@@ -137,10 +138,16 @@ These variables are mainly for the sibling test backend used by the scripts and 
 The current foundation is already strong: routing, startup orchestration, concurrent cold-start coordination, idle shutdown, and config loading are in place.
 
 Next up:
-
+- uploading binairies
 - auth and request hardening hooks
+- webui
 - richer service introspection
 - stronger observability and recovery behavior
+
+- allow starting of processes on other servers
+- transition to actual serverless by using firecracker
+
+- load balancing
 
 ## Why This Project Exists
 
