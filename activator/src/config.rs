@@ -4,8 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rusqlite::{Connection, params};
-use serde::Deserialize;
+use rusqlite::Connection;
 
 use crate::registry::{ServiceConfig, ServiceRegistry};
 
@@ -32,22 +31,13 @@ CREATE TABLE IF NOT EXISTS services (
 );
 "#;
 
-#[derive(Debug, Deserialize)]
-struct LegacyTomlConfig {
-    #[serde(rename = "service", default)]
-    services: Vec<RawServiceConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 struct RawServiceConfig {
     route_prefix: String,
     command: String,
-    #[serde(default)]
     args: Vec<String>,
     port: u16,
-    #[serde(default = "default_strip_prefix")]
     strip_prefix: bool,
-    #[serde(default)]
     environment: HashMap<String, String>,
     working_directory: Option<PathBuf>,
     startup_timeout_ms: u64,
@@ -70,34 +60,49 @@ struct DbServiceRow {
 }
 
 pub fn load_registry_from_path(path: &Path) -> Result<ServiceRegistry, ConfigError> {
-    if is_legacy_toml_path(path) {
-        return load_registry_from_database_path(&legacy_database_path(path), Some(path));
-    }
-
-    load_registry_from_database_path(path, None)
+    reject_legacy_toml_path(path)?;
+    let connection = open_database_connection(path)?;
+    load_registry_from_connection(&connection, path)
 }
 
 pub fn default_config_path() -> PathBuf {
     PathBuf::from("config/services.db")
 }
 
-fn load_registry_from_database_path(
-    path: &Path,
-    legacy_path_override: Option<&Path>,
-) -> Result<ServiceRegistry, ConfigError> {
+pub fn open_database_connection(path: &Path) -> Result<Connection, ConfigError> {
+    reject_legacy_toml_path(path)?;
     ensure_parent_dir(path)?;
 
-    let mut connection = Connection::open(path).map_err(|source| ConfigError::OpenFailed {
+    Connection::open(path).map_err(|source| ConfigError::OpenFailed {
         path: path.to_path_buf(),
         source,
-    })?;
+    })
+}
 
-    initialize_schema(&connection, path)?;
-    bootstrap_database_if_needed(&mut connection, path, legacy_path_override)?;
+pub fn load_registry_from_connection(
+    connection: &Connection,
+    path: &Path,
+) -> Result<ServiceRegistry, ConfigError> {
+    initialize_schema(connection, path)?;
 
-    let services = load_raw_services_from_db(&connection, path)?;
+    let services = load_raw_services_from_db(connection, path)?;
     let services = build_service_configs(services, path)?;
     Ok(ServiceRegistry::from_services(services))
+}
+
+fn reject_legacy_toml_path(path: &Path) -> Result<(), ConfigError> {
+    let is_toml = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("toml"));
+
+    if is_toml {
+        return Err(ConfigError::UnsupportedConfigPath {
+            path: path.to_path_buf(),
+        });
+    }
+
+    Ok(())
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<(), ConfigError> {
@@ -119,148 +124,6 @@ fn initialize_schema(connection: &Connection, path: &Path) -> Result<(), ConfigE
             operation: "initialize schema",
             source,
         })
-}
-
-fn bootstrap_database_if_needed(
-    connection: &mut Connection,
-    db_path: &Path,
-    legacy_path_override: Option<&Path>,
-) -> Result<(), ConfigError> {
-    if count_services(connection, db_path)? > 0 {
-        return Ok(());
-    }
-
-    let legacy_path = legacy_path_override
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| legacy_toml_path(db_path));
-
-    if !legacy_path.exists() {
-        return Ok(());
-    }
-
-    let services = load_legacy_services(&legacy_path)?;
-    let _ = build_service_configs(services.clone(), &legacy_path)?;
-    insert_services(connection, db_path, services)?;
-
-    tracing::info!(
-        config_path = %db_path.display(),
-        legacy_path = %legacy_path.display(),
-        "imported legacy service config into sqlite"
-    );
-
-    Ok(())
-}
-
-fn count_services(connection: &Connection, path: &Path) -> Result<u64, ConfigError> {
-    connection
-        .query_row("SELECT COUNT(*) FROM services", [], |row| row.get(0))
-        .map_err(|source| ConfigError::DatabaseFailed {
-            path: path.to_path_buf(),
-            operation: "count configured services",
-            source,
-        })
-}
-
-fn load_legacy_services(path: &Path) -> Result<Vec<RawServiceConfig>, ConfigError> {
-    let raw = fs::read_to_string(path).map_err(|source| ConfigError::LegacyReadFailed {
-        path: path.to_path_buf(),
-        source,
-    })?;
-
-    let parsed: LegacyTomlConfig =
-        toml::from_str(&raw).map_err(|source| ConfigError::LegacyParseFailed {
-            path: path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(parsed.services)
-}
-
-fn insert_services(
-    connection: &mut Connection,
-    path: &Path,
-    services: Vec<RawServiceConfig>,
-) -> Result<(), ConfigError> {
-    let tx = connection
-        .transaction()
-        .map_err(|source| ConfigError::DatabaseFailed {
-            path: path.to_path_buf(),
-            operation: "start bootstrap transaction",
-            source,
-        })?;
-
-    {
-        let mut statement = tx
-            .prepare(
-                "INSERT INTO services (
-                    route_prefix,
-                    command,
-                    args_json,
-                    backend_port,
-                    strip_prefix,
-                    environment_json,
-                    working_directory,
-                    startup_timeout_ms,
-                    idle_timeout_secs,
-                    health_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .map_err(|source| ConfigError::DatabaseFailed {
-                path: path.to_path_buf(),
-                operation: "prepare bootstrap insert",
-                source,
-            })?;
-
-        for service in services {
-            let route_prefix = service.route_prefix.clone();
-            let args_json = serde_json::to_string(&service.args).map_err(|source| {
-                ConfigError::SerializeFailed {
-                    path: path.to_path_buf(),
-                    route_prefix: route_prefix.clone(),
-                    field: "args",
-                    source,
-                }
-            })?;
-            let environment_json =
-                serde_json::to_string(&service.environment).map_err(|source| {
-                    ConfigError::SerializeFailed {
-                        path: path.to_path_buf(),
-                        route_prefix: route_prefix.clone(),
-                        field: "environment",
-                        source,
-                    }
-                })?;
-            let working_directory = service
-                .working_directory
-                .as_ref()
-                .map(|value| value.to_string_lossy().into_owned());
-
-            statement
-                .execute(params![
-                    service.route_prefix,
-                    service.command,
-                    args_json,
-                    service.port,
-                    service.strip_prefix,
-                    environment_json,
-                    working_directory,
-                    service.startup_timeout_ms,
-                    service.idle_timeout_secs,
-                    service.health_path,
-                ])
-                .map_err(|source| ConfigError::DatabaseFailed {
-                    path: path.to_path_buf(),
-                    operation: "insert bootstrap service",
-                    source,
-                })?;
-        }
-    }
-
-    tx.commit().map_err(|source| ConfigError::DatabaseFailed {
-        path: path.to_path_buf(),
-        operation: "commit bootstrap transaction",
-        source,
-    })
 }
 
 fn load_raw_services_from_db(
@@ -350,20 +213,6 @@ fn load_raw_services_from_db(
     }
 
     Ok(services)
-}
-
-fn legacy_database_path(path: &Path) -> PathBuf {
-    path.with_extension("db")
-}
-
-fn legacy_toml_path(path: &Path) -> PathBuf {
-    path.with_extension("toml")
-}
-
-fn is_legacy_toml_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| value.eq_ignore_ascii_case("toml"))
 }
 
 fn build_service_configs(
@@ -504,12 +353,11 @@ fn resolve_path(base_dir: &Path, candidate: PathBuf) -> PathBuf {
     }
 }
 
-fn default_strip_prefix() -> bool {
-    true
-}
-
 #[derive(Debug)]
 pub enum ConfigError {
+    UnsupportedConfigPath {
+        path: PathBuf,
+    },
     CreateDirectoryFailed {
         path: PathBuf,
         source: std::io::Error,
@@ -522,20 +370,6 @@ pub enum ConfigError {
         path: PathBuf,
         operation: &'static str,
         source: rusqlite::Error,
-    },
-    LegacyReadFailed {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    LegacyParseFailed {
-        path: PathBuf,
-        source: toml::de::Error,
-    },
-    SerializeFailed {
-        path: PathBuf,
-        route_prefix: String,
-        field: &'static str,
-        source: serde_json::Error,
     },
     InvalidStoredJson {
         path: PathBuf,
@@ -563,6 +397,11 @@ pub enum ConfigError {
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnsupportedConfigPath { path } => write!(
+                f,
+                "config path `{}` is not supported; use a SQLite database file instead of TOML",
+                path.display()
+            ),
             Self::CreateDirectoryFailed { path, source } => {
                 write!(
                     f,
@@ -585,32 +424,6 @@ impl fmt::Display for ConfigError {
                 write!(
                     f,
                     "failed to {operation} in config database `{}`: {source}",
-                    path.display()
-                )
-            }
-            Self::LegacyReadFailed { path, source } => {
-                write!(
-                    f,
-                    "failed to read legacy config file `{}`: {source}",
-                    path.display()
-                )
-            }
-            Self::LegacyParseFailed { path, source } => {
-                write!(
-                    f,
-                    "failed to parse legacy config file `{}`: {source}",
-                    path.display()
-                )
-            }
-            Self::SerializeFailed {
-                path,
-                route_prefix,
-                field,
-                source,
-            } => {
-                write!(
-                    f,
-                    "failed to serialize `{field}` for service `{route_prefix}` into config database `{}`: {source}",
                     path.display()
                 )
             }
@@ -661,9 +474,9 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use rusqlite::Connection;
+    use rusqlite::{Connection, params};
 
-    use super::{RawServiceConfig, initialize_schema, insert_services, load_registry_from_path};
+    use super::{RawServiceConfig, initialize_schema, load_registry_from_path};
 
     #[test]
     fn loads_services_from_sqlite_and_resolves_relative_paths() {
@@ -698,124 +511,48 @@ mod tests {
     }
 
     #[test]
-    fn imports_legacy_toml_when_database_is_empty() {
-        let config_dir = unique_temp_dir("activator_toml_import");
-        let db_path = config_dir.join("nested/services.db");
-        let legacy_path = db_path.with_extension("toml");
-        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-        fs::write(
-            &legacy_path,
-            r#"
-[[service]]
-route_prefix = "api"
-command = "cargo"
-args = ["run"]
-port = 9001
-startup_timeout_ms = 4000
-idle_timeout_secs = 120
-health_path = "/health"
-working_directory = "../backend"
-"#,
-        )
-        .unwrap();
+    fn rejects_empty_database() {
+        let db_path = unique_temp_dir("activator_empty_db").join("services.db");
 
-        let registry = load_registry_from_path(&db_path).unwrap();
-        let resolved = registry.resolve("/api/demo").unwrap();
+        let error = load_registry_from_path(&db_path).err().unwrap();
 
-        assert_eq!(resolved.service.config.backend_port, 9001);
-
-        let connection = Connection::open(&db_path).unwrap();
-        let count: u64 = connection
-            .query_row("SELECT COUNT(*) FROM services", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 1);
-
+        assert!(error.to_string().contains("does not define any services"));
         cleanup_path(&db_path);
     }
 
     #[test]
-    fn still_accepts_an_explicit_legacy_toml_path() {
-        let config_dir = unique_temp_dir("activator_explicit_toml");
-        let legacy_path = config_dir.join("nested/services.toml");
-        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-        fs::write(
-            &legacy_path,
-            r#"
-[[service]]
-route_prefix = "api"
-command = "cargo"
-port = 9001
-startup_timeout_ms = 4000
-idle_timeout_secs = 120
-health_path = "/health"
-"#,
-        )
-        .unwrap();
+    fn rejects_toml_config_paths() {
+        let toml_path = unique_temp_dir("activator_toml_path").join("services.toml");
 
-        let registry = load_registry_from_path(&legacy_path).unwrap();
-        assert!(registry.resolve("/api").is_some());
-        assert!(legacy_path.with_extension("db").exists());
+        let error = load_registry_from_path(&toml_path).err().unwrap();
 
-        cleanup_path(&legacy_path);
+        assert!(error.to_string().contains("instead of TOML"));
+        cleanup_path(&toml_path);
     }
 
     #[test]
-    fn rejects_duplicate_route_prefixes_from_legacy_import() {
-        let db_path = write_legacy_config_file(
-            "activator_duplicate_route",
-            r#"
-[[service]]
-route_prefix = "api"
-command = "cargo"
-port = 9001
-startup_timeout_ms = 4000
-idle_timeout_secs = 120
-health_path = "/health"
+    fn rejects_duplicate_route_prefixes_from_database_rows() {
+        let db_path = unique_temp_dir("activator_duplicate_route").join("services.db");
+        let connection = initialize_non_unique_database(&db_path);
 
-[[service]]
-route_prefix = "api"
-command = "cargo"
-port = 9002
-startup_timeout_ms = 4000
-idle_timeout_secs = 120
-health_path = "/health"
-"#,
-        );
+        insert_raw_row(&connection, "api", 9001);
+        insert_raw_row(&connection, "api", 9002);
 
-        let error = load_registry_from_path(&db_path.with_extension("db"))
-            .err()
-            .unwrap();
+        let error = load_registry_from_path(&db_path).err().unwrap();
         assert!(error.to_string().contains("route_prefix `api`"));
 
         cleanup_path(&db_path);
     }
 
     #[test]
-    fn rejects_duplicate_ports_from_legacy_import() {
-        let db_path = write_legacy_config_file(
-            "activator_duplicate_port",
-            r#"
-[[service]]
-route_prefix = "api"
-command = "cargo"
-port = 9001
-startup_timeout_ms = 4000
-idle_timeout_secs = 120
-health_path = "/health"
+    fn rejects_duplicate_ports_from_database_rows() {
+        let db_path = unique_temp_dir("activator_duplicate_port").join("services.db");
+        let connection = initialize_non_unique_database(&db_path);
 
-[[service]]
-route_prefix = "media"
-command = "cargo"
-port = 9001
-startup_timeout_ms = 4000
-idle_timeout_secs = 120
-health_path = "/health"
-"#,
-        );
+        insert_raw_row(&connection, "api", 9001);
+        insert_raw_row(&connection, "media", 9001);
 
-        let error = load_registry_from_path(&db_path.with_extension("db"))
-            .err()
-            .unwrap();
+        let error = load_registry_from_path(&db_path).err().unwrap();
         assert!(error.to_string().contains("backend port `9001`"));
 
         cleanup_path(&db_path);
@@ -823,8 +560,7 @@ health_path = "/health"
 
     #[test]
     fn rejects_invalid_json_stored_in_database() {
-        let config_dir = unique_temp_dir("activator_invalid_json");
-        let db_path = config_dir.join("services.db");
+        let db_path = unique_temp_dir("activator_invalid_json").join("services.db");
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         let connection = Connection::open(&db_path).unwrap();
@@ -843,7 +579,7 @@ health_path = "/health"
                     idle_timeout_secs,
                     health_path
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                rusqlite::params![
+                params![
                     "api",
                     "cargo",
                     "not json",
@@ -868,15 +604,105 @@ health_path = "/health"
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut connection = Connection::open(path).unwrap();
         initialize_schema(&connection, path).unwrap();
-        insert_services(&mut connection, path, services).unwrap();
+        insert_services(&mut connection, services);
     }
 
-    fn write_legacy_config_file(prefix: &str, content: &str) -> PathBuf {
-        let dir = unique_temp_dir(prefix);
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("services.toml");
-        fs::write(&path, content).unwrap();
-        path
+    fn initialize_non_unique_database(path: &Path) -> Connection {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let connection = Connection::open(path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE services (
+                    route_prefix TEXT NOT NULL,
+                    command TEXT NOT NULL,
+                    args_json TEXT NOT NULL DEFAULT '[]',
+                    backend_port INTEGER NOT NULL,
+                    strip_prefix INTEGER NOT NULL DEFAULT 1,
+                    environment_json TEXT NOT NULL DEFAULT '{}',
+                    working_directory TEXT,
+                    startup_timeout_ms INTEGER NOT NULL,
+                    idle_timeout_secs INTEGER NOT NULL,
+                    health_path TEXT NOT NULL
+                )",
+            )
+            .unwrap();
+        connection
+    }
+
+    fn insert_raw_row(connection: &Connection, route_prefix: &str, backend_port: u16) {
+        connection
+            .execute(
+                "INSERT INTO services (
+                    route_prefix,
+                    command,
+                    args_json,
+                    backend_port,
+                    strip_prefix,
+                    environment_json,
+                    working_directory,
+                    startup_timeout_ms,
+                    idle_timeout_secs,
+                    health_path
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    route_prefix,
+                    "cargo",
+                    "[]",
+                    backend_port,
+                    true,
+                    "{}",
+                    Option::<String>::None,
+                    4000,
+                    120,
+                    "/health",
+                ],
+            )
+            .unwrap();
+    }
+
+    fn insert_services(connection: &mut Connection, services: Vec<RawServiceConfig>) {
+        let tx = connection.transaction().unwrap();
+        let mut statement = tx
+            .prepare(
+                "INSERT INTO services (
+                    route_prefix,
+                    command,
+                    args_json,
+                    backend_port,
+                    strip_prefix,
+                    environment_json,
+                    working_directory,
+                    startup_timeout_ms,
+                    idle_timeout_secs,
+                    health_path
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .unwrap();
+
+        for service in services {
+            let working_directory = service
+                .working_directory
+                .as_ref()
+                .map(|value| value.to_string_lossy().into_owned());
+
+            statement
+                .execute(params![
+                    service.route_prefix,
+                    service.command,
+                    serde_json::to_string(&service.args).unwrap(),
+                    service.port,
+                    service.strip_prefix,
+                    serde_json::to_string(&service.environment).unwrap(),
+                    working_directory,
+                    service.startup_timeout_ms,
+                    service.idle_timeout_secs,
+                    service.health_path,
+                ])
+                .unwrap();
+        }
+
+        drop(statement);
+        tx.commit().unwrap();
     }
 
     fn cleanup_path(path: &Path) {

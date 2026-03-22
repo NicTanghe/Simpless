@@ -47,7 +47,7 @@ This is the core pitch of the project: a small Rust gateway that gives self-host
 - A Rust toolchain
 - A backend service you want the activator to start
 
-The default config database is development-oriented and points at a sibling test backend in `../../hello_backend`. On first run, the activator will create `activator/config/services.db` and import the sample service from `activator/config/services.toml`. If that backend does not exist in your local workspace, update the bootstrap TOML before first run or edit the SQLite row afterward.
+The repo ships a sample SQLite config at `activator/config/services.db` that points at a sibling test backend in `../../hello_backend`. If that backend does not exist in your local workspace, update the SQLite row before running the gateway.
 
 Run the activator:
 
@@ -80,8 +80,6 @@ cd C:\Users\Nicol\dev\leptos\FXiT\simpless\activator
 
 The activator loads services from `activator/config/services.db` by default. You can override the database path with `ACTIVATOR_CONFIG_PATH`.
 
-If the database is empty and an adjacent legacy TOML file exists, the activator imports that file once into SQLite. Passing a `.toml` path through `ACTIVATOR_CONFIG_PATH` also migrates into a sibling `.db` file automatically.
-
 SQLite schema:
 
 ```sql
@@ -111,6 +109,12 @@ Supported service fields:
 - `working_directory`
 - `strip_prefix` stored as `0` or `1`
 - `environment_json` JSON object of string pairs
+
+Example update:
+
+```powershell
+sqlite3 activator/config/services.db "select route_prefix, command, backend_port, working_directory from services;"
+```
 
 ## Environment Variables
 

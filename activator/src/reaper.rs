@@ -5,21 +5,24 @@ use tokio::{
     time::{MissedTickBehavior, interval},
 };
 
-use crate::registry::{ServiceEntry, ServiceRegistry};
+use std::sync::Arc;
 
-pub fn spawn_reaper(registry: ServiceRegistry, sweep_interval: Duration) -> JoinHandle<()> {
+use crate::{app::AppState, registry::ServiceEntry};
+
+pub fn spawn_reaper(state: Arc<AppState>, sweep_interval: Duration) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = interval(sweep_interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
             ticker.tick().await;
-            sweep_once(&registry).await;
+            sweep_once(&state).await;
         }
     })
 }
 
-pub async fn sweep_once(registry: &ServiceRegistry) {
+pub async fn sweep_once(state: &Arc<AppState>) {
+    let registry = state.registry_snapshot().await;
     for service in registry.all_services() {
         sweep_service(&service).await;
     }

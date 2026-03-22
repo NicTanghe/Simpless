@@ -1,3 +1,4 @@
+mod admin;
 mod app;
 mod auth;
 mod config;
@@ -8,6 +9,7 @@ mod registry;
 mod startup;
 
 use std::{env, error::Error, net::SocketAddr, sync::Arc, time::Duration};
+use std::path::PathBuf;
 
 use tokio::net::TcpListener;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -28,6 +30,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config_path = env::var("ACTIVATOR_CONFIG_PATH")
         .map(Into::into)
         .unwrap_or_else(|_| default_config_path());
+    let upload_dir: PathBuf = env::var("ACTIVATOR_UPLOAD_DIR")
+        .map(Into::into)
+        .unwrap_or_else(|_| "uploads".into());
     let reaper_interval = Duration::from_millis(
         env::var("ACTIVATOR_REAPER_INTERVAL_MS")
             .ok()
@@ -36,14 +41,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let registry = load_registry_from_path(&config_path)?;
-    let state = Arc::new(AppState::new(registry));
-    let _reaper = spawn_reaper(state.registry.clone(), reaper_interval);
+    let state = Arc::new(AppState::new(registry, config_path.clone(), upload_dir.clone())?);
+    let _reaper = spawn_reaper(state.clone(), reaper_interval);
     let app = app::build_router(state);
     let listener = TcpListener::bind(bind_addr).await?;
 
     tracing::info!(
         %bind_addr,
         config_path = %config_path.display(),
+        upload_dir = %upload_dir.display(),
         ?reaper_interval,
         "activator listening"
     );

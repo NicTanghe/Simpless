@@ -21,8 +21,8 @@ pub async fn proxy_request(
     request: Request<Body>,
 ) -> Result<Response<Body>, ProxyError> {
     let request_path = request.uri().path().to_owned();
-    let resolved = state
-        .registry
+    let registry = state.registry_snapshot().await;
+    let resolved = registry
         .resolve(&request_path)
         .ok_or_else(|| ProxyError::UnknownRoute(request_path.clone()))?;
 
@@ -258,7 +258,7 @@ mod tests {
         });
 
         let registry = ServiceRegistry::from_services([test_service_config("api", backend_addr)]);
-        let app = build_router(Arc::new(AppState::new(registry)));
+        let app = build_router(test_app_state(registry));
 
         let response = app
             .oneshot(
@@ -295,7 +295,7 @@ mod tests {
             )]),
             120,
         )]);
-        let app = build_router(Arc::new(AppState::new(registry)));
+        let app = build_router(test_app_state(registry));
 
         let response = app
             .oneshot(
@@ -338,7 +338,7 @@ mod tests {
             ]),
             120,
         )]);
-        let app = build_router(Arc::new(AppState::new(registry)));
+        let app = build_router(test_app_state(registry));
 
         let mut requests = JoinSet::new();
         for _ in 0..10 {
@@ -399,8 +399,9 @@ mod tests {
             ]),
             1,
         )]);
-        let reaper = spawn_reaper(registry.clone(), Duration::from_millis(100));
-        let app = build_router(Arc::new(AppState::new(registry)));
+        let state = test_app_state(registry.clone());
+        let reaper = spawn_reaper(state.clone(), Duration::from_millis(100));
+        let app = build_router(state);
 
         let first_response = app
             .clone()
@@ -486,5 +487,20 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("{prefix}_{timestamp}.log"))
+    }
+
+    fn test_app_state(registry: ServiceRegistry) -> Arc<AppState> {
+        let base = unique_test_dir("activator_proxy_state");
+        Arc::new(
+            AppState::new(registry, base.join("services.db"), base.join("uploads")).unwrap(),
+        )
+    }
+
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}_{timestamp}"))
     }
 }

@@ -132,7 +132,7 @@ async fn wait_for_ready(service: &ServiceEntry, client: &ProxyClient) -> Result<
         }
 
         if Instant::now() >= deadline {
-            stop_process(service).await?;
+            stop_service_process(service).await?;
             return Err(StartupError::TimedOut {
                 route_prefix: service.config.route_prefix.clone(),
                 timeout_ms: timeout.as_millis() as u64,
@@ -164,7 +164,7 @@ async fn probe_backend_ready(
     }
 }
 
-async fn stop_process(service: &ServiceEntry) -> Result<(), StartupError> {
+pub async fn stop_service_process(service: &ServiceEntry) -> Result<(), StartupError> {
     let mut child = {
         let mut runtime = service.runtime.lock().await;
         runtime.process.take()

@@ -413,7 +413,7 @@ Goal: create a minimal activator that can route and proxy to an already-running 
 Tasks:
 
 1. Create a new Rust project for the activator.
-2. Add dependencies: `axum`, `tokio`, `tower`, `hyper`, `serde`, `toml`, `tracing`, `tracing-subscriber`.
+2. Add dependencies: `axum`, `tokio`, `tower`, `hyper`, `serde`, `rusqlite`, `serde_json`, `tracing`, `tracing-subscriber`.
 3. Define a static service registry in code.
 4. Implement path-prefix extraction.
 5. Implement URI rewrite and reverse proxy to a loopback backend.
@@ -489,14 +489,14 @@ Goal: stop hardcoding service definitions.
 
 Tasks:
 
-1. Move service definitions into a TOML config file.
-2. Parse config at startup.
+1. Move service definitions into a SQLite config database.
+2. Load config rows at startup.
 3. Validate duplicate route prefixes and duplicate ports.
 4. Fail fast on invalid configuration.
 
 Exit criteria:
 
-- services are defined entirely in TOML
+- services are defined entirely in SQLite
 - activator can manage multiple services without recompilation
 
 ---
@@ -604,7 +604,7 @@ activator/
     auth.rs
     health.rs
   config/
-    services.toml
+    services.db
 ```
 
 ### Module roles
