@@ -1,84 +1,85 @@
-# Home Activator Workspace
+# simpless
 
-## Quick Overview
+**The self-hosted activator gateway that makes local services feel serverless.**
 
-This workspace contains a small Rust gateway that exposes one public port and starts a loopback-only backend on demand.
+`simpless` gives you one clean ingress point for side projects, home-lab APIs, and internal tools. It keeps backend services private on loopback, starts them only when traffic arrives, and shuts them back down when they go idle.
 
-- `activator/`: the Axum gateway
-- `hello_backend/`: a simple Axum backend used for local testing
-- `docs/home_activator_axum_design_doc.md`: the design doc the implementation follows
+The result is simple: less always-on clutter, less exposed surface area, and a setup that feels far more polished than a pile of manually managed ports.
 
-Current default behavior:
+Built with `axum`, `hyper`, `tower`, and `tokio`.
 
-- the activator listens on `127.0.0.1:3000`
-- `/api/*` is routed to a backend on `127.0.0.1:9001`
-- the `/api` prefix is stripped before forwarding
-- if the backend is not running, the activator starts it
-- concurrent cold-start requests share one startup path
-- idle backends are stopped by the reaper after the configured timeout
+## Why It Stands Out
 
-## Current Status
+- One public entry point instead of a different port for every service
+- Loopback-only backends by default
+- Automatic cold start on first request
+- Shared startup coordination for concurrent traffic
+- Idle shutdown to reclaim resources when a service is not being used
+- Config-driven routing through TOML
+- Health endpoints and PowerShell verification scripts included
 
-Implemented:
+## What Ships Today
 
-- Phase 0: proxy to a running loopback backend
-- Phase 1: start backend on first request
-- Phase 2: coordinate concurrent startup
-- Phase 3: idle shutdown and restart on later request
-- Phase 4: TOML config file support
+- Reverse proxying for configured prefixes such as `/api/*`
+- Prefix stripping before forwarding to the backend
+- Forwarding of method, headers, body, and query string
+- On-demand process startup with readiness probing
+- Single-start behavior under concurrent cold-start traffic
+- Idle reaping and later restart on the next request
+- Activator health endpoints at `/health` and `/ready`
+- Startup-time config validation for duplicate route prefixes and backend ports
 
-Not implemented yet:
+## How It Works
 
-- Phase 5: auth and request hardening
-- Phase 6: richer observability and service introspection
-- Phase 7: hardening and crash-loop recovery
+1. A request hits the activator on one exposed address.
+2. The activator maps the first path segment, such as `/api`, to a configured service.
+3. If the backend is asleep, the activator starts it and waits for it to become ready.
+4. The request is proxied to the loopback-only backend.
+5. After an idle timeout, the backend is stopped automatically.
+
+This is the core pitch of the project: a small Rust gateway that gives self-hosted services a "wake on demand" experience.
 
 ## Quick Start
+
+### Prerequisites
+
+- A Rust toolchain
+- A backend service you want the activator to start
+
+The default config is development-oriented and points at a sibling test backend in `../../hello_backend`. If that service does not exist in your local workspace, update `activator/config/services.toml` before running the gateway.
 
 Run the activator:
 
 ```powershell
-cd C:\Users\Nicol\dev\leptos\FXiT\simples\activator
+cd C:\Users\Nicol\dev\leptos\FXiT\simpless\activator
 $env:RUST_LOG="info"
 cargo run --release
 ```
 
-The backend should autostart on the first `/api` request.
+Default local endpoints:
 
-Default config file:
+- `http://127.0.0.1:3000/health`
+- `http://127.0.0.1:3000/ready`
+- `http://127.0.0.1:3000/api/...`
 
-- `activator\config\services.toml`
+Useful verification scripts:
 
-Useful scripts:
+- `activator/smoke_test.ps1`
+- `activator/concurrent_startup_test.ps1`
+- `activator/check_backend_shutdown.ps1`
 
-- `activator\smoke_test.ps1`: basic gateway and proxy smoke test
-- `activator\concurrent_startup_test.ps1`: cold-start concurrency check
-- `activator\check_backend_shutdown.ps1`: idle shutdown check
-
-Example fast idle-shutdown test:
-
-```powershell
-cd C:\Users\Nicol\dev\leptos\FXiT\simples\activator
-$env:RUST_LOG="info"
-$env:ACTIVATOR_REAPER_INTERVAL_MS="250"
-$env:ACTIVATOR_CONFIG_PATH="config/services.fast.toml"
-cargo run --release
-```
-
-Then in another terminal:
+Example:
 
 ```powershell
-cd C:\Users\Nicol\dev\leptos\FXiT\simples\activator
-.\check_backend_shutdown.ps1 -IdleWaitSeconds 10 -ConfiguredIdleTimeoutSeconds 5
+cd C:\Users\Nicol\dev\leptos\FXiT\simpless\activator
+.\smoke_test.ps1
 ```
 
-Where `config/services.fast.toml` is a copy of `config/services.toml` with `idle_timeout_secs = 5`.
+## Configuration
 
-## Config File
+The activator loads services from `activator/config/services.toml` by default. You can override the file path with `ACTIVATOR_CONFIG_PATH`.
 
-The activator now loads services from TOML at startup. The default path is `config/services.toml`, or you can override it with `ACTIVATOR_CONFIG_PATH`.
-
-Current default file:
+Example service definition:
 
 ```toml
 [[service]]
@@ -92,7 +93,7 @@ health_path = "/health"
 working_directory = "../../hello_backend"
 ```
 
-Supported service fields:
+Supported fields:
 
 - `route_prefix`
 - `command`
@@ -102,8 +103,8 @@ Supported service fields:
 - `idle_timeout_secs`
 - `health_path`
 - `working_directory`
-- `strip_prefix` (optional, defaults to `true`)
-- `environment` (optional TOML table)
+- `strip_prefix` optional, defaults to `true`
+- `environment` optional TOML table
 
 ## Environment Variables
 
@@ -111,25 +112,38 @@ Supported service fields:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `RUST_LOG` | `info` fallback if unset | Tracing filter used by `tracing-subscriber`. |
+| `RUST_LOG` | `info` if unset | Tracing filter used by `tracing-subscriber`. |
 | `ACTIVATOR_BIND_ADDR` | `127.0.0.1:3000` | Address the activator binds to. |
 | `ACTIVATOR_CONFIG_PATH` | `config/services.toml` | TOML file that defines managed services. |
-| `ACTIVATOR_REAPER_INTERVAL_MS` | `1000` | Background reaper sweep interval in milliseconds. |
+| `ACTIVATOR_REAPER_INTERVAL_MS` | `1000` | Idle-reaper sweep interval in milliseconds. |
 
-### Hello Backend
+### Test Backend
 
-These are mainly for testing and are normally injected by the activator or tests.
+These variables are mainly for the sibling test backend used by the scripts and local verification flow.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `HELLO_BACKEND_BIND_ADDR` | `127.0.0.1:9001` | Address the test backend binds to. |
-| `HELLO_BACKEND_START_DELAY_MS` | `0` | Optional artificial startup delay for startup/concurrency tests. |
-| `HELLO_BACKEND_START_MARKER` | unset | Optional file path; when set, the backend appends `started` on boot. Used by tests to prove how many times it started. |
+| `HELLO_BACKEND_START_DELAY_MS` | `0` | Artificial startup delay for startup and concurrency tests. |
+| `HELLO_BACKEND_START_MARKER` | unset | Optional file path used by tests to record backend starts. |
 
-## Notes
+## Project Layout
 
-- Service definitions now come from TOML and are validated on startup.
-- The activator fails fast on missing config, parse errors, duplicate route prefixes, and duplicate backend ports.
-- Only the `/api` route is configured by default.
-- The default `/api` backend startup command is development-oriented and assumes the sibling `hello_backend` crate exists.
-- If you want a real cold-start test, make sure nothing is already listening on the backend port before running the scripts.
+- `activator/` main crate, config, and PowerShell test scripts
+- `docs/home_activator_axum_design_doc.md` longer architecture and roadmap document
+
+## Roadmap
+
+The current foundation is already strong: routing, startup orchestration, concurrent cold-start coordination, idle shutdown, and config loading are in place.
+
+Next up:
+
+- auth and request hardening hooks
+- richer service introspection
+- stronger observability and recovery behavior
+
+## Why This Project Exists
+
+Most self-hosted setups drift toward one of two bad extremes: too many always-on processes, or too much manual start-stop friction. `simpless` is built to sit in the middle and give you the better tradeoff.
+
+You keep the control of self-hosting, but you get a cleaner ingress story, lower idle overhead, and a workflow that feels much closer to a mature platform product than a collection of local scripts.
