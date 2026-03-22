@@ -16,7 +16,7 @@ Built with `axum`, `hyper`, `tower`, and `tokio`.
 - Automatic cold start on first request
 - Shared startup coordination for concurrent traffic
 - Idle shutdown to reclaim resources when a service is not being used
-- Config-driven routing through TOML
+- Config-driven routing through SQLite
 - Health endpoints and PowerShell verification scripts included
 
 ## What Ships Today
@@ -47,7 +47,7 @@ This is the core pitch of the project: a small Rust gateway that gives self-host
 - A Rust toolchain
 - A backend service you want the activator to start
 
-The default config is development-oriented and points at a sibling test backend in `../../hello_backend`. If that service does not exist in your local workspace, update `activator/config/services.toml` before running the gateway.
+The default config database is development-oriented and points at a sibling test backend in `../../hello_backend`. On first run, the activator will create `activator/config/services.db` and import the sample service from `activator/config/services.toml`. If that backend does not exist in your local workspace, update the bootstrap TOML before first run or edit the SQLite row afterward.
 
 Run the activator:
 
@@ -78,34 +78,39 @@ cd C:\Users\Nicol\dev\leptos\FXiT\simpless\activator
 
 ## Configuration
 
-The activator loads services from `activator/config/services.toml` by default. You can override the file path with `ACTIVATOR_CONFIG_PATH`.
+The activator loads services from `activator/config/services.db` by default. You can override the database path with `ACTIVATOR_CONFIG_PATH`.
 
-Example service definition:
+If the database is empty and an adjacent legacy TOML file exists, the activator imports that file once into SQLite. Passing a `.toml` path through `ACTIVATOR_CONFIG_PATH` also migrates into a sibling `.db` file automatically.
 
-```toml
-[[service]]
-route_prefix = "api"
-command = "cargo"
-args = ["run"]
-port = 9001
-startup_timeout_ms = 15000
-idle_timeout_secs = 120
-health_path = "/health"
-working_directory = "../../hello_backend"
+SQLite schema:
+
+```sql
+CREATE TABLE services (
+    route_prefix TEXT PRIMARY KEY,
+    command TEXT NOT NULL,
+    args_json TEXT NOT NULL,
+    backend_port INTEGER NOT NULL UNIQUE,
+    strip_prefix INTEGER NOT NULL,
+    environment_json TEXT NOT NULL,
+    working_directory TEXT,
+    startup_timeout_ms INTEGER NOT NULL,
+    idle_timeout_secs INTEGER NOT NULL,
+    health_path TEXT NOT NULL
+);
 ```
 
-Supported fields:
+Supported service fields:
 
 - `route_prefix`
 - `command`
-- `args`
-- `port`
+- `args_json` JSON array of strings
+- `backend_port`
 - `startup_timeout_ms`
 - `idle_timeout_secs`
 - `health_path`
 - `working_directory`
-- `strip_prefix` optional, defaults to `true`
-- `environment` optional TOML table
+- `strip_prefix` stored as `0` or `1`
+- `environment_json` JSON object of string pairs
 
 ## Environment Variables
 
@@ -115,7 +120,7 @@ Supported fields:
 | --- | --- | --- |
 | `RUST_LOG` | `info` if unset | Tracing filter used by `tracing-subscriber`. |
 | `ACTIVATOR_BIND_ADDR` | `127.0.0.1:3000` | Address the activator binds to. |
-| `ACTIVATOR_CONFIG_PATH` | `config/services.toml` | TOML file that defines managed services. |
+| `ACTIVATOR_CONFIG_PATH` | `config/services.db` | SQLite database that defines managed services. |
 | `ACTIVATOR_REAPER_INTERVAL_MS` | `1000` | Idle-reaper sweep interval in milliseconds. |
 
 ### Test Backend
@@ -138,6 +143,7 @@ These variables are mainly for the sibling test backend used by the scripts and 
 The current foundation is already strong: routing, startup orchestration, concurrent cold-start coordination, idle shutdown, and config loading are in place.
 
 Next up:
+
 - uploading binairies
 - auth and request hardening hooks
 - webui

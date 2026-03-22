@@ -299,35 +299,30 @@ Keep the mapping explicit and static in v1. Avoid dynamic route registration at 
 
 ### v1
 
-Use a simple config file, for example TOML.
+Use a small SQLite database so configuration stays mutable and can later be edited through an admin endpoint without introducing another storage layer.
 
 Example:
 
-```toml
-[[service]]
-route_prefix = "api"
-command = "/opt/services/backend-api"
-args = []
-port = 9001
-startup_timeout_ms = 4000
-idle_timeout_secs = 120
-health_path = "/health"
-
-[[service]]
-route_prefix = "media"
-command = "/opt/services/backend-media"
-args = []
-port = 9002
-startup_timeout_ms = 4000
-idle_timeout_secs = 180
-health_path = "/health"
+```sql
+CREATE TABLE services (
+    route_prefix TEXT PRIMARY KEY,
+    command TEXT NOT NULL,
+    args_json TEXT NOT NULL,
+    backend_port INTEGER NOT NULL UNIQUE,
+    strip_prefix INTEGER NOT NULL,
+    environment_json TEXT NOT NULL,
+    working_directory TEXT,
+    startup_timeout_ms INTEGER NOT NULL,
+    idle_timeout_secs INTEGER NOT NULL,
+    health_path TEXT NOT NULL
+);
 ```
 
-### Why TOML
+### Why SQLite
 
-- easy to version
-- readable
-- natural fit with Rust tooling
+- single-file deployment
+- transactional updates from future API endpoints
+- enough structure to enforce uniqueness and basic validation
 
 ---
 
@@ -716,4 +711,3 @@ The most sensible build order is:
 6. add security and observability
 
 That order keeps the system debuggable and lets you validate the architecture one layer at a time.
-

@@ -1,3 +1,4 @@
+# Legacy bootstrap config. On first run this is imported into services.db.
 [[service]]
 route_prefix = "api"
 command = "cargo"

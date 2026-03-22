@@ -1,2 +1,5 @@
 /hello_backend/
 target/
+activator/config/*.db
+activator/config/*.db-shm
+activator/config/*.db-wal
